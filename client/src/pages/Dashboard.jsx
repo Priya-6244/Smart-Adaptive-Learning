@@ -12,6 +12,7 @@ import {
   ArrowRight,
   RefreshCw,
   History,
+  UserRound,
 } from 'lucide-react'
 
 const API_URL = 'http://localhost:5000/api'
@@ -31,12 +32,15 @@ function Dashboard() {
     setError('')
 
     try {
-      const [statsResponse, topicsResponse, recommendationResponse] =
-        await Promise.all([
-          fetch(`${API_URL}/quiz/stats`),
-          fetch(`${API_URL}/questions/topics`),
-          fetch(`${API_URL}/quiz/recommendations`),
-        ])
+      const [
+        statsResponse,
+        topicsResponse,
+        recommendationResponse,
+      ] = await Promise.all([
+        fetch(`${API_URL}/quiz/stats`),
+        fetch(`${API_URL}/questions/topics`),
+        fetch(`${API_URL}/quiz/recommendations`),
+      ])
 
       if (
         !statsResponse.ok ||
@@ -183,6 +187,14 @@ function Dashboard() {
               <RefreshCw size={16} />
               Refresh
             </button>
+
+            <button
+              onClick={() => navigate('/profile')}
+              className="flex items-center gap-2 rounded-xl border border-slate-700 px-4 py-3 text-sm text-slate-300 transition hover:border-purple-500 hover:bg-slate-900 hover:text-white"
+            >
+              <UserRound size={17} />
+              Profile
+            </button>
           </div>
         </header>
 
@@ -257,7 +269,9 @@ function Dashboard() {
               <Brain size={25} />
             </div>
 
-            <h2 className="text-xl font-bold">Your Next Learning Step</h2>
+            <h2 className="text-xl font-bold">
+              Your Next Learning Step
+            </h2>
             <p className="mt-2 text-sm leading-6 text-slate-400">
               Choose a topic to practise. Your saved quiz results help
               identify areas that need more work.
@@ -347,7 +361,9 @@ function Dashboard() {
 
         <footer className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-slate-800 bg-slate-900 p-5">
           <div>
-            <h2 className="font-semibold">Review your learning progress</h2>
+            <h2 className="font-semibold">
+              Review your learning progress
+            </h2>
             <p className="mt-1 text-sm text-slate-400">
               Revisit previous scores and answer explanations.
             </p>
