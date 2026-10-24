@@ -5,24 +5,21 @@ const userSchema = new mongoose.Schema(
   {
     name: {
       type: String,
-      required: [true, 'Name is required'],
-      trim: true,
-      minlength: [2, 'Name must be at least 2 characters']
+      required: true,
+      trim: true
     },
 
     email: {
       type: String,
-      required: [true, 'Email is required'],
+      required: true,
       unique: true,
       lowercase: true,
-      trim: true,
-      match: [/^\S+@\S+\.\S+$/, 'Please enter a valid email']
+      trim: true
     },
 
     password: {
       type: String,
-      required: [true, 'Password is required'],
-      minlength: [8, 'Password must be at least 8 characters'],
+      required: true,
       select: false
     },
 
@@ -34,9 +31,17 @@ const userSchema = new mongoose.Schema(
     passwordResetExpires: {
       type: Date,
       select: false
+    },
+
+    // Used to invalidate previously issued login tokens.
+    tokenVersion: {
+      type: Number,
+      default: 0
     }
   },
-  { timestamps: true }
+  {
+    timestamps: true
+  }
 )
 
 module.exports = mongoose.model('User', userSchema)

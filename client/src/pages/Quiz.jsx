@@ -1,9 +1,14 @@
 
 import { useEffect, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
-import { ArrowLeft, ArrowRight, CheckCircle, Clock, Send } from 'lucide-react'
+import {
+  ArrowLeft,
+  ArrowRight,
+  CheckCircle,
+  Clock,
+  Send,
+} from 'lucide-react'
 import toast from 'react-hot-toast'
-
 
 const API_URL = 'http://localhost:5000/api'
 
@@ -12,8 +17,7 @@ function Quiz() {
   const navigate = useNavigate()
 
   const topic = location.state?.topic || ''
-  const requestedDifficulty =
-    location.state?.difficulty || 'easy'
+  const requestedDifficulty = location.state?.difficulty || 'easy'
 
   const [questions, setQuestions] = useState([])
   const [answers, setAnswers] = useState({})
@@ -30,23 +34,38 @@ function Quiz() {
       setLoading(true)
 
       try {
-        const params = new URLSearchParams()
+        const token = localStorage.getItem('token')
 
-        if (topic) {
-          params.set('topic', topic)
+        if (!token) {
+          navigate('/login', { replace: true })
+          return
         }
 
-        // Request unanswered questions for the selected topic.
+        const params = new URLSearchParams()
+
+        if (topic) params.set('topic', topic)
+
         const response = await fetch(
-          `${API_URL}/questions?${params.toString()}`
+          `${API_URL}/questions?${params.toString()}`,
+          {
+            headers: {
+              Authorization: `Bearer ${token}`,
+            },
+          }
         )
 
         const data = await response.json()
 
         if (!response.ok || !data.success) {
-          throw new Error(
-            data.message || 'Unable to load questions.'
-          )
+          if (response.status === 401) {
+            localStorage.removeItem('token')
+            localStorage.removeItem('user')
+            toast.error('Your session has expired. Please log in again.')
+            navigate('/login', { replace: true })
+            return
+          }
+
+          throw new Error(data.message || 'Unable to load questions.')
         }
 
         if (!active) return
@@ -58,20 +77,16 @@ function Quiz() {
         setTimeTaken(0)
 
         if (!data.questions?.length) {
-          toast.error(
-            'No questions are available for this topic.'
-          )
+          toast.error('No questions are available for this topic.')
         } else if (data.poolReset) {
-          toast('You have completed this topic’s question pool. Questions will now repeat.')
+          toast('The question pool has restarted.')
         }
       } catch (error) {
         if (active) {
           toast.error(error.message || 'Failed to load questions.')
         }
       } finally {
-        if (active) {
-          setLoading(false)
-        }
+        if (active) setLoading(false)
       }
     }
 
@@ -80,13 +95,10 @@ function Quiz() {
     return () => {
       active = false
     }
-  }, [topic, requestedDifficulty])
+  }, [topic, requestedDifficulty, navigate])
 
-  // Track quiz time while questions are displayed.
   useEffect(() => {
-    if (loading || submitting || questions.length === 0) {
-      return
-    }
+    if (loading || submitting || questions.length === 0) return
 
     const timer = setInterval(() => {
       setTimeTaken((previous) => previous + 1)
@@ -125,6 +137,14 @@ function Quiz() {
       return
     }
 
+    const token = localStorage.getItem('token')
+
+    if (!token) {
+      toast.error('Your session has expired. Please log in again.')
+      navigate('/login', { replace: true })
+      return
+    }
+
     setSubmitting(true)
 
     try {
@@ -133,13 +153,22 @@ function Quiz() {
         selectedAnswer: answers[question._id],
       }))
 
+      let user = {}
+
+      try {
+        user = JSON.parse(localStorage.getItem('user') || '{}')
+      } catch {
+        user = {}
+      }
+
       const response = await fetch(`${API_URL}/quiz/submit`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({
-          learnerName: 'Learner',
+          learnerName: user.name || 'Learner',
           topic,
           requestedDifficulty,
           timeTakenSeconds: timeTaken,
@@ -149,10 +178,16 @@ function Quiz() {
 
       const data = await response.json()
 
+      if (response.status === 401) {
+        localStorage.removeItem('token')
+        localStorage.removeItem('user')
+        toast.error('Your session has expired. Please log in again.')
+        navigate('/login', { replace: true })
+        return
+      }
+
       if (!response.ok || !data.success) {
-        throw new Error(
-          data.message || 'Unable to submit your quiz.'
-        )
+        throw new Error(data.message || 'Unable to submit your quiz.')
       }
 
       toast.success('Quiz submitted successfully!')
@@ -261,8 +296,8 @@ function Quiz() {
 
         {poolReset && (
           <div className="mb-5 rounded-xl border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-200">
-            You have attempted all available questions in this
-            selection. The question pool has restarted.
+            You have attempted all available questions in this selection.
+            The question pool has restarted.
           </div>
         )}
 
@@ -271,7 +306,6 @@ function Quiz() {
             <span className="text-sm text-slate-400">
               Question {currentIndex + 1}
             </span>
-
             <span className="rounded-full bg-slate-800 px-3 py-1 text-xs capitalize text-slate-300">
               {currentQuestion.difficulty || 'mixed'}
             </span>
@@ -283,8 +317,7 @@ function Quiz() {
 
           <div className="space-y-3">
             {currentQuestion.options.map((option, index) => {
-              const selected =
-                answers[currentQuestion._id] === option
+              const selected = answers[currentQuestion._id] === option
 
               return (
                 <button

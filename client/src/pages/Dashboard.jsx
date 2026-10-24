@@ -1,5 +1,5 @@
 
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   BookOpen,
@@ -27,20 +27,45 @@ function Dashboard() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
 
-  async function loadDashboard() {
+  const loadDashboard = useCallback(async () => {
     setLoading(true)
     setError('')
 
+    const token = localStorage.getItem('token')
+
+    if (!token) {
+      setLoading(false)
+      navigate('/login', { replace: true })
+      return
+    }
+
     try {
+      const requestOptions = {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      }
+
       const [
         statsResponse,
         topicsResponse,
         recommendationResponse,
       ] = await Promise.all([
-        fetch(`${API_URL}/quiz/stats`),
-        fetch(`${API_URL}/questions/topics`),
-        fetch(`${API_URL}/quiz/recommendations`),
+        fetch(`${API_URL}/quiz/stats`, requestOptions),
+        fetch(`${API_URL}/questions/topics`, requestOptions),
+        fetch(`${API_URL}/quiz/recommendations`, requestOptions),
       ])
+
+      if (
+        statsResponse.status === 401 ||
+        topicsResponse.status === 401 ||
+        recommendationResponse.status === 401
+      ) {
+        localStorage.removeItem('token')
+        localStorage.removeItem('user')
+        navigate('/login', { replace: true })
+        return
+      }
 
       if (
         !statsResponse.ok ||
@@ -76,11 +101,11 @@ function Dashboard() {
     } finally {
       setLoading(false)
     }
-  }
+  }, [navigate])
 
   useEffect(() => {
     loadDashboard()
-  }, [])
+  }, [loadDashboard])
 
   function startQuiz(topicName) {
     if (!topicName) return
@@ -113,7 +138,9 @@ function Dashboard() {
           <h1 className="mb-3 text-xl font-bold">
             Dashboard could not load
           </h1>
+
           <p className="mb-5 text-slate-400">{error}</p>
+
           <button
             onClick={loadDashboard}
             className="rounded-xl bg-purple-600 px-5 py-3 font-semibold hover:bg-purple-500"
@@ -208,6 +235,7 @@ function Dashboard() {
                 <span className="text-sm text-slate-400">{label}</span>
                 <Icon size={21} className={color} />
               </div>
+
               <p className="text-3xl font-bold">{value}</p>
             </div>
           ))}
@@ -219,10 +247,12 @@ function Dashboard() {
               <div className="rounded-xl bg-purple-500/10 p-3 text-purple-400">
                 <TrendingUp size={23} />
               </div>
+
               <div>
                 <h2 className="text-xl font-bold">
                   Topic-wise Performance
                 </h2>
+
                 <p className="text-sm text-slate-400">
                   Discover your strengths and areas for improvement.
                 </p>
@@ -239,6 +269,7 @@ function Dashboard() {
                   <div key={item.topic}>
                     <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
                       <span className="font-medium">{item.topic}</span>
+
                       <span className="text-sm text-slate-400">
                         {item.accuracy === null
                           ? 'Not attempted'
@@ -272,6 +303,7 @@ function Dashboard() {
             <h2 className="text-xl font-bold">
               Your Next Learning Step
             </h2>
+
             <p className="mt-2 text-sm leading-6 text-slate-400">
               Choose a topic to practise. Your saved quiz results help
               identify areas that need more work.
@@ -299,10 +331,12 @@ function Dashboard() {
 
             <div className="mt-4 flex items-center gap-3 rounded-xl border border-slate-700 bg-slate-950/60 p-4">
               <Clock className="shrink-0 text-purple-400" size={21} />
+
               <div>
                 <p className="text-sm text-slate-400">
                   Recommended difficulty
                 </p>
+
                 <p className="font-semibold capitalize">
                   {stats?.currentLevel || 'easy'}
                 </p>
@@ -324,6 +358,7 @@ function Dashboard() {
           <h2 className="mb-2 text-xl font-bold">
             Personalized Recommendations
           </h2>
+
           <p className="mb-5 text-sm text-slate-400">
             Topics needing improvement appear first.
           </p>
@@ -336,6 +371,7 @@ function Dashboard() {
               >
                 <div className="mb-3 flex items-start justify-between gap-3">
                   <h3 className="font-semibold">{item.topic}</h3>
+
                   <span className="rounded-full bg-slate-800 px-2.5 py-1 text-xs text-slate-300">
                     {item.accuracy === null
                       ? 'New topic'
@@ -364,6 +400,7 @@ function Dashboard() {
             <h2 className="font-semibold">
               Review your learning progress
             </h2>
+
             <p className="mt-1 text-sm text-slate-400">
               Revisit previous scores and answer explanations.
             </p>

@@ -5,23 +5,32 @@ const router = express.Router()
 
 const Question = require('../models/Question')
 const QuizResult = require('../models/QuizResult')
+const { authenticateUser } = require('./authRoutes')
 
 const DIFFICULTIES = ['easy', 'medium', 'hard']
+const QUESTIONS_PER_QUIZ = 10
 
+// Get available topics.
 router.get('/topics', async (req, res) => {
   try {
     const topics = await Question.distinct('topic')
-    res.json({ success: true, topics: topics.sort() })
+
+    return res.json({
+      success: true,
+      topics: topics.sort(),
+    })
   } catch (error) {
-    console.error(error)
-    res.status(500).json({
+    console.error('Fetching topics failed:', error.message)
+
+    return res.status(500).json({
       success: false,
       message: 'Failed to fetch topics.',
     })
   }
 })
 
-router.get('/', async (req, res) => {
+// Load questions for the authenticated learner.
+router.get('/', authenticateUser, async (req, res) => {
   try {
     const { topic, difficulty, exclude } = req.query
 
@@ -35,16 +44,47 @@ router.get('/', async (req, res) => {
       })
     }
 
-    const baseFilter = {}
-    if (topic) baseFilter.topic = topic
+    const userId = req.user._id
 
-    const previousResponses = topic
-      ? await QuizResult.aggregate([
-          { $unwind: '$responses' },
-          { $match: { 'responses.topic': topic } },
-          { $group: { _id: '$responses.questionId' } },
-        ])
-      : []
+    // Only consider this learner's history.
+    const historyFilter = { userId }
+
+    // If no difficulty was explicitly supplied, use the learner's
+    // most recent recommendation for the selected topic.
+    let requestedLevel = difficulty
+      ? difficulty.toLowerCase()
+      : null
+
+    if (!requestedLevel) {
+      const latestResult = await QuizResult.findOne({
+        ...historyFilter,
+        ...(topic ? { topic } : {}),
+      })
+        .sort({ createdAt: -1, _id: -1 })
+        .select('recommendedDifficulty difficulty')
+        .lean()
+
+      requestedLevel =
+        latestResult?.recommendedDifficulty ||
+        latestResult?.difficulty ||
+        'easy'
+    }
+
+    const baseFilter = {}
+
+    if (topic) {
+      baseFilter.topic = topic
+    }
+
+    // Find questions already attempted by this learner.
+    const previousResponses = await QuizResult.aggregate([
+      { $match: historyFilter },
+      { $unwind: '$responses' },
+      ...(topic
+        ? [{ $match: { 'responses.topic': topic } }]
+        : []),
+      { $group: { _id: '$responses.questionId' } },
+    ])
 
     const excludedIds = [
       ...new Set([
@@ -61,14 +101,10 @@ router.get('/', async (req, res) => {
       unansweredFilter._id = { $nin: excludedIds }
     }
 
-    const requestedLevel = difficulty
-      ? difficulty.toLowerCase()
-      : null
-
     async function sampleQuestions(filter) {
       return Question.aggregate([
         { $match: filter },
-        { $sample: { size: 10 } },
+        { $sample: { size: QUESTIONS_PER_QUIZ } },
         { $project: { correctAnswer: 0 } },
       ])
     }
@@ -77,57 +113,57 @@ router.get('/', async (req, res) => {
     let poolReset = false
     let difficultyFallback = false
 
-    if (requestedLevel) {
-      questions = await sampleQuestions({
-        ...unansweredFilter,
-        difficulty: requestedLevel,
-      })
-    } else {
-      questions = await sampleQuestions(unansweredFilter)
-    }
+    // First try unanswered questions at the recommended level.
+    questions = await sampleQuestions({
+      ...unansweredFilter,
+      difficulty: requestedLevel,
+    })
 
+    // If none exist at that level, try unanswered questions
+    // from other difficulty levels.
     if (questions.length === 0) {
       questions = await sampleQuestions(unansweredFilter)
 
-      if (questions.length > 0 && requestedLevel) {
+      if (questions.length > 0) {
         difficultyFallback = true
       }
     }
 
+    // If all available questions were attempted, reset the pool.
     if (questions.length === 0) {
       poolReset = true
 
-      if (requestedLevel) {
-        questions = await sampleQuestions({
-          ...baseFilter,
-          difficulty: requestedLevel,
-        })
-      }
+      questions = await sampleQuestions({
+        ...baseFilter,
+        difficulty: requestedLevel,
+      })
 
       if (questions.length === 0) {
         questions = await sampleQuestions(baseFilter)
 
-        if (requestedLevel && questions.length > 0) {
+        if (questions.length > 0) {
           difficultyFallback = true
         }
       }
     }
 
-    res.json({
+    return res.json({
       success: true,
       count: questions.length,
       questions,
+      recommendedDifficulty: requestedLevel,
       poolReset,
       difficultyFallback,
       message: poolReset
         ? 'All available questions have been attempted. The question pool has restarted.'
         : difficultyFallback
-          ? 'No unanswered questions were available at the requested level, so other levels were selected.'
+          ? 'No questions were available at the recommended level, so questions from other levels were selected.'
           : 'Questions loaded successfully.',
     })
   } catch (error) {
     console.error('Fetching questions failed:', error.message)
-    res.status(500).json({
+
+    return res.status(500).json({
       success: false,
       message: 'Failed to fetch questions.',
     })

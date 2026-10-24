@@ -42,6 +42,14 @@ const responseSchema = new mongoose.Schema(
 
 const quizResultSchema = new mongoose.Schema(
   {
+    // Links each quiz attempt to its registered user
+    userId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      default: null,
+      index: true,
+    },
+
     learnerName: {
       type: String,
       default: 'Learner',
