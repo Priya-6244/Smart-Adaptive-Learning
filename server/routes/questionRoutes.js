@@ -1,171 +1,293 @@
 
 const express = require('express')
 const mongoose = require('mongoose')
-const router = express.Router()
 
 const Question = require('../models/Question')
 const QuizResult = require('../models/QuizResult')
+const AdaptiveProgress = require('../models/AdaptiveProgress')
 const { authenticateUser } = require('./authRoutes')
 
-const DIFFICULTIES = ['easy', 'medium', 'hard']
-const QUESTIONS_PER_QUIZ = 10
+const router = express.Router()
 
-// Get available topics.
+const QUESTIONS_PER_QUIZ = 10
+const DIFFICULTIES = ['easy', 'medium', 'hard']
+
+// Escape special characters before using a topic in a regular expression.
+function escapeRegex(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+// Match topic names without case sensitivity or accidental partial matches.
+function createTopicFilter(topic) {
+  const cleanTopic = String(topic || '').trim()
+
+  if (!cleanTopic) {
+    return {}
+  }
+
+  return {
+    topic: {
+      $regex: `^${escapeRegex(cleanTopic)}$`,
+      $options: 'i',
+    },
+  }
+}
+
+// Return available topics.
 router.get('/topics', async (req, res) => {
   try {
     const topics = await Question.distinct('topic')
 
     return res.json({
       success: true,
-      topics: topics.sort(),
+      topics: topics.filter(Boolean).sort(),
     })
   } catch (error) {
-    console.error('Fetching topics failed:', error.message)
+    console.error('Get topics error:', error)
 
     return res.status(500).json({
       success: false,
-      message: 'Failed to fetch topics.',
+      message: 'Failed to load topics.',
     })
   }
 })
 
-// Load questions for the authenticated learner.
-router.get('/', authenticateUser, async (req, res) => {
+// Get the next adaptive question for a specific topic.
+router.get('/next', authenticateUser, async (req, res) => {
   try {
-    const { topic, difficulty, exclude } = req.query
+    const topic = String(req.query.topic || '').trim()
 
-    if (
-      difficulty &&
-      !DIFFICULTIES.includes(difficulty.toLowerCase())
-    ) {
+    if (!topic) {
       return res.status(400).json({
         success: false,
-        message: 'Difficulty must be easy, medium, or hard.',
+        message: 'Topic is required.',
       })
     }
 
-    const userId = req.user._id
+    const userId = req.user._id || req.user.id
+    const topicFilter = createTopicFilter(topic)
 
-    // Only consider this learner's history.
-    const historyFilter = { userId }
+    // Use a consistent topic name for the progress record.
+    let progress = await AdaptiveProgress.findOne({
+      userId,
+      topic,
+    })
 
-    // If no difficulty was explicitly supplied, use the learner's
-    // most recent recommendation for the selected topic.
-    let requestedLevel = difficulty
-      ? difficulty.toLowerCase()
-      : null
-
-    if (!requestedLevel) {
-      const latestResult = await QuizResult.findOne({
-        ...historyFilter,
-        ...(topic ? { topic } : {}),
+    if (!progress) {
+      progress = await AdaptiveProgress.create({
+        userId,
+        topic,
+        currentDifficulty: 'medium',
+        attemptedQuestionIds: [],
       })
-        .sort({ createdAt: -1, _id: -1 })
-        .select('recommendedDifficulty difficulty')
-        .lean()
-
-      requestedLevel =
-        latestResult?.recommendedDifficulty ||
-        latestResult?.difficulty ||
-        'easy'
     }
 
-    const baseFilter = {}
-
-    if (topic) {
-      baseFilter.topic = topic
+    if (!DIFFICULTIES.includes(progress.currentDifficulty)) {
+      progress.currentDifficulty = 'medium'
+      await progress.save()
     }
 
-    // Find questions already attempted by this learner.
-    const previousResponses = await QuizResult.aggregate([
-      { $match: historyFilter },
-      { $unwind: '$responses' },
-      ...(topic
-        ? [{ $match: { 'responses.topic': topic } }]
-        : []),
-      { $group: { _id: '$responses.questionId' } },
-    ])
+    const attemptedIds = progress.attemptedQuestionIds || []
 
-    const excludedIds = [
-      ...new Set([
-        ...previousResponses.map((item) => String(item._id)),
-        ...(exclude ? exclude.split(',') : []),
-      ]),
-    ]
-      .filter((id) => mongoose.Types.ObjectId.isValid(id))
-      .map((id) => new mongoose.Types.ObjectId(id))
+    // Find a question at the current difficulty.
+    async function selectQuestion(excludedIds, difficulty) {
+      const match = {
+        ...topicFilter,
+        _id: { $nin: excludedIds },
+      }
 
-    const unansweredFilter = { ...baseFilter }
+      if (difficulty) {
+        match.difficulty = difficulty
+      }
 
-    if (excludedIds.length) {
-      unansweredFilter._id = { $nin: excludedIds }
-    }
-
-    async function sampleQuestions(filter) {
       return Question.aggregate([
-        { $match: filter },
-        { $sample: { size: QUESTIONS_PER_QUIZ } },
+        { $match: match },
+        { $sample: { size: 1 } },
         { $project: { correctAnswer: 0 } },
       ])
     }
 
-    let questions = []
-    let poolReset = false
+    let questions = await selectQuestion(
+      attemptedIds,
+      progress.currentDifficulty
+    )
+
     let difficultyFallback = false
+    let poolReset = false
 
-    // First try unanswered questions at the recommended level.
-    questions = await sampleQuestions({
-      ...unansweredFilter,
-      difficulty: requestedLevel,
-    })
-
-    // If none exist at that level, try unanswered questions
-    // from other difficulty levels.
+    // If the current difficulty has no unanswered questions,
+    // try another difficulty in the same topic.
     if (questions.length === 0) {
-      questions = await sampleQuestions(unansweredFilter)
+      questions = await selectQuestion(attemptedIds, null)
+      difficultyFallback = questions.length > 0
+    }
 
-      if (questions.length > 0) {
-        difficultyFallback = true
+    // If every question has been attempted, reset this topic's pool.
+    if (questions.length === 0) {
+      const availableCount = await Question.countDocuments(topicFilter)
+
+      if (availableCount === 0) {
+        return res.json({
+          success: true,
+          question: null,
+          currentDifficulty: progress.currentDifficulty,
+          completed: true,
+          message: 'No questions exist for this topic.',
+        })
+      }
+
+      progress.attemptedQuestionIds = []
+      await progress.save()
+
+      poolReset = true
+
+      // Start a new cycle at the current difficulty first.
+      questions = await selectQuestion(
+        [],
+        progress.currentDifficulty
+      )
+
+      // If that difficulty has no questions, use any difficulty.
+      if (questions.length === 0) {
+        questions = await selectQuestion([], null)
+        difficultyFallback = questions.length > 0
       }
     }
 
-    // If all available questions were attempted, reset the pool.
     if (questions.length === 0) {
-      poolReset = true
-
-      questions = await sampleQuestions({
-        ...baseFilter,
-        difficulty: requestedLevel,
+      return res.json({
+        success: true,
+        question: null,
+        currentDifficulty: progress.currentDifficulty,
+        completed: true,
+        message: 'No questions are currently available.',
       })
+    }
 
-      if (questions.length === 0) {
-        questions = await sampleQuestions(baseFilter)
+    return res.json({
+      success: true,
+      question: questions[0],
+      currentDifficulty: progress.currentDifficulty,
+      difficultyFallback,
+      poolReset,
+      completed: false,
+    })
+  } catch (error) {
+    console.error('Next question error:', error)
 
-        if (questions.length > 0) {
-          difficultyFallback = true
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to load the next question.',
+    })
+  }
+})
+
+// Get a question pool for a quiz.
+router.get('/', authenticateUser, async (req, res) => {
+  try {
+    const topic = String(req.query.topic || '').trim()
+    const requestedDifficulty = String(
+      req.query.difficulty || 'easy'
+    ).trim().toLowerCase()
+
+    const difficulty = DIFFICULTIES.includes(requestedDifficulty)
+      ? requestedDifficulty
+      : 'easy'
+
+    const topicFilter = createTopicFilter(topic)
+
+    const excludedIds = String(req.query.exclude || '')
+      .split(',')
+      .filter(Boolean)
+      .filter((id) => mongoose.Types.ObjectId.isValid(id))
+      .map((id) => new mongoose.Types.ObjectId(id))
+
+    const filter = {
+      ...topicFilter,
+      difficulty,
+    }
+
+    if (excludedIds.length > 0) {
+      filter._id = { $nin: excludedIds }
+    }
+
+    let questions = await Question.aggregate([
+      { $match: filter },
+      { $sample: { size: QUESTIONS_PER_QUIZ } },
+      { $project: { correctAnswer: 0 } },
+    ])
+
+    let poolReset = false
+    let difficultyFallback = false
+
+    // Try the same topic at another difficulty if needed.
+    if (questions.length === 0 && topic) {
+      const fallbackFilter = {
+        ...topicFilter,
+      }
+
+      if (excludedIds.length > 0) {
+        fallbackFilter._id = { $nin: excludedIds }
+      }
+
+      questions = await Question.aggregate([
+        { $match: fallbackFilter },
+        { $sample: { size: QUESTIONS_PER_QUIZ } },
+        { $project: { correctAnswer: 0 } },
+      ])
+
+      difficultyFallback = questions.length > 0
+    }
+
+    // If the excluded questions exhaust the topic pool, start again.
+    if (questions.length === 0 && topic) {
+      const availableCount = await Question.countDocuments(topicFilter)
+
+      if (availableCount > 0) {
+        const resetFilter = {
+          ...topicFilter,
+          difficulty,
         }
+
+        questions = await Question.aggregate([
+          { $match: resetFilter },
+          { $sample: { size: QUESTIONS_PER_QUIZ } },
+          { $project: { correctAnswer: 0 } },
+        ])
+
+        if (questions.length === 0) {
+          questions = await Question.aggregate([
+            { $match: topicFilter },
+            { $sample: { size: QUESTIONS_PER_QUIZ } },
+            { $project: { correctAnswer: 0 } },
+          ])
+
+          difficultyFallback = questions.length > 0
+        }
+
+        poolReset = questions.length > 0
       }
     }
 
     return res.json({
       success: true,
-      count: questions.length,
       questions,
-      recommendedDifficulty: requestedLevel,
-      poolReset,
+      count: questions.length,
+      topic: topic || null,
+      difficulty,
       difficultyFallback,
-      message: poolReset
-        ? 'All available questions have been attempted. The question pool has restarted.'
-        : difficultyFallback
-          ? 'No questions were available at the recommended level, so questions from other levels were selected.'
+      poolReset,
+      message:
+        questions.length === 0
+          ? 'No questions are available for this topic.'
           : 'Questions loaded successfully.',
     })
   } catch (error) {
-    console.error('Fetching questions failed:', error.message)
+    console.error('Get questions error:', error)
 
     return res.status(500).json({
       success: false,
-      message: 'Failed to fetch questions.',
+      message: 'Failed to load questions.',
     })
   }
 })

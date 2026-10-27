@@ -1,10 +1,17 @@
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
+
+import {
+  BrowserRouter,
+  Routes,
+  Route,
+  Navigate,
+} from 'react-router-dom'
 import { Toaster } from 'react-hot-toast'
 
 import Dashboard from './pages/Dashboard.jsx'
 import Quiz from './pages/Quiz.jsx'
 import QuizResult from './pages/QuizResult.jsx'
 import QuizHistory from './pages/QuizHistory.jsx'
+import ConceptRecommendations from './pages/ConceptRecommendations.jsx'
 import Login from './pages/Login.jsx'
 import Signup from './pages/Signup.jsx'
 import Profile from './pages/Profile.jsx'
@@ -30,19 +37,38 @@ function App() {
 
       <Routes>
         {/* Public routes */}
-        <Route path="/" element={<Navigate to="/login" replace />} />
+        <Route
+          path="/"
+          element={<Navigate to="/login" replace />}
+        />
         <Route path="/login" element={<Login />} />
         <Route path="/signup" element={<Signup />} />
-        <Route path="/forgot-password" element={<ForgotPassword />} />
-        <Route path="/reset-password" element={<ResetPassword />} />
+        <Route
+          path="/forgot-password"
+          element={<ForgotPassword />}
+        />
+        <Route
+          path="/reset-password"
+          element={<ResetPassword />}
+        />
 
         {/* Protected routes */}
         <Route element={<ProtectedRoute />}>
           <Route path="/dashboard" element={<Dashboard />} />
           <Route path="/profile" element={<Profile />} />
           <Route path="/quiz" element={<Quiz />} />
-          <Route path="/quiz/results" element={<QuizResult />} />
-          <Route path="/quiz/history" element={<QuizHistory />} />
+          <Route
+            path="/quiz/results"
+            element={<QuizResult />}
+          />
+          <Route
+            path="/quiz/history"
+            element={<QuizHistory />}
+          />
+          <Route
+            path="/concept-recommendations"
+            element={<ConceptRecommendations />}
+          />
         </Route>
       </Routes>
     </BrowserRouter>

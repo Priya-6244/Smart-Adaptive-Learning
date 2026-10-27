@@ -1,4 +1,3 @@
-
 const express = require('express')
 const mongoose = require('mongoose')
 const router = express.Router()
@@ -7,9 +6,12 @@ const Question = require('../models/Question')
 const QuizResult = require('../models/QuizResult')
 const User = require('../models/User')
 const { authenticateUser } = require('./authRoutes')
+const AdaptiveProgress = require('../models/AdaptiveProgress')
+const {
+  getConceptRecommendations,
+} = require('../services/conceptRecommendationService')
 
 // Recover legacy quiz records for the original account only.
-// Records already assigned to an account are never reassigned.
 async function recoverLegacyResults(user) {
   const oldestUser = await User.findOne()
     .sort({ createdAt: 1, _id: 1 })
@@ -45,7 +47,6 @@ function getNextDifficulty(
 ) {
   const rank = { easy: 1, medium: 2, hard: 3 }
 
-  // Use up to three previous attempts from the same topic.
   const recentScores = previousResults
     .slice(0, 3)
     .map((result) => Number(result.scorePercentage))
@@ -58,7 +59,6 @@ function getNextDifficulty(
       recentScores.reduce((sum, score) => sum + score, 0) /
       recentScores.length
 
-    // Give the latest attempt more influence than older attempts.
     adjustedScore = Math.round(
       percentage * 0.7 + previousAverage * 0.3
     )
@@ -66,7 +66,6 @@ function getNextDifficulty(
 
   const currentRank = rank[currentDifficulty] || 1
 
-  // Reduce difficulty when performance is consistently low.
   if (adjustedScore < 40) {
     return currentRank === 1
       ? 'easy'
@@ -75,14 +74,12 @@ function getNextDifficulty(
         : 'easy'
   }
 
-  // Increase difficulty when performance is strong.
   if (adjustedScore >= 80) {
     if (currentRank === 1) return 'medium'
     if (currentRank === 2) return 'hard'
     return 'hard'
   }
 
-  // Keep the current level for scores from 40% to 79%.
   return currentDifficulty
 }
 
@@ -100,7 +97,7 @@ function getActualDifficulty(results) {
   return 'hard'
 }
 
-// Submit and save a quiz for the authenticated user.
+// Submit and save a quiz.
 router.post('/submit', authenticateUser, async (req, res) => {
   try {
     const { answers, topic, timeTakenSeconds } = req.body
@@ -178,7 +175,6 @@ router.post('/submit', authenticateUser, async (req, res) => {
 
     const selectedTopic = topic || responses[0].topic
 
-    // Do not combine different topics into one adaptive result.
     if (responses.some((response) => response.topic !== selectedTopic)) {
       return res.status(400).json({
         success: false,
@@ -197,7 +193,6 @@ router.post('/submit', authenticateUser, async (req, res) => {
 
     const actualDifficulty = getActualDifficulty(responses)
 
-    // Retrieve this learner's previous attempts for this topic only.
     const previousResults = await QuizResult.find({
       userId: req.user._id,
       topic: selectedTopic,
@@ -249,7 +244,7 @@ router.post('/submit', authenticateUser, async (req, res) => {
   }
 })
 
-// Dashboard statistics for the logged-in user.
+// Dashboard statistics.
 router.get('/stats', authenticateUser, async (req, res) => {
   try {
     await recoverLegacyResults(req.user)
@@ -296,7 +291,7 @@ router.get('/stats', authenticateUser, async (req, res) => {
   }
 })
 
-// Quiz history for the logged-in user.
+// Quiz history.
 router.get('/results', authenticateUser, async (req, res) => {
   try {
     await recoverLegacyResults(req.user)
@@ -322,7 +317,7 @@ router.get('/results', authenticateUser, async (req, res) => {
   }
 })
 
-// Topic-wise performance for the logged-in user.
+// Level 3: personalized topic recommendations.
 router.get('/recommendations', authenticateUser, async (req, res) => {
   try {
     await recoverLegacyResults(req.user)
@@ -341,12 +336,12 @@ router.get('/recommendations', authenticateUser, async (req, res) => {
       )
 
       const totalQuestions = attempts.reduce(
-        (sum, attempt) => sum + attempt.totalQuestions,
+        (sum, attempt) => sum + (attempt.totalQuestions || 0),
         0
       )
 
       const correctAnswers = attempts.reduce(
-        (sum, attempt) => sum + attempt.correctAnswers,
+        (sum, attempt) => sum + (attempt.correctAnswers || 0),
         0
       )
 
@@ -354,20 +349,34 @@ router.get('/recommendations', authenticateUser, async (req, res) => {
         ? Math.round((correctAnswers / totalQuestions) * 100)
         : null
 
+      let performanceLevel
       let recommendation
+      let recommendedActivity
 
       if (accuracy === null) {
+  performanceLevel = 'Not Assessed'
+  recommendation =
+    'Start a quiz to measure your current performance in this topic.'
+  recommendedActivity =
+    'Complete a beginner-level practice quiz.'
+} else if (accuracy < 50) {
+        performanceLevel = 'Needs Improvement'
         recommendation =
-          'Start a quiz in this topic to measure your progress.'
-      } else if (accuracy < 60) {
-        recommendation =
-          'Review the explanations and practise this topic again.'
+          'Review the explanations for incorrect answers and practise this topic again.'
+        recommendedActivity =
+          'Review the topic basics, study worked examples, and complete easy practice questions.'
       } else if (accuracy < 80) {
+        performanceLevel = 'Developing'
         recommendation =
-          'Keep practising to improve your accuracy.'
+          'You understand some of this topic but would benefit from more practice.'
+        recommendedActivity =
+          'Review incorrect answers and complete medium-level practice questions.'
       } else {
+        performanceLevel = 'Strong'
         recommendation =
-          'Great progress! Try a higher difficulty level.'
+          'You are performing well in this topic. Try more challenging questions.'
+        recommendedActivity =
+          'Attempt hard-level questions to strengthen your understanding.'
       }
 
       return {
@@ -376,25 +385,194 @@ router.get('/recommendations', authenticateUser, async (req, res) => {
         questionsAnswered: totalQuestions,
         correctAnswers,
         accuracy,
+        performanceLevel,
         recommendation,
+        recommendedActivity,
       }
     })
 
     topicPerformance.sort((a, b) => {
       if (a.accuracy === null && b.accuracy !== null) return -1
       if (b.accuracy === null && a.accuracy !== null) return 1
+
       return (a.accuracy ?? 0) - (b.accuracy ?? 0)
     })
+
+    const assessedTopics = topicPerformance.filter(
+      (item) => item.accuracy !== null
+    )
+
+    const strongTopics = assessedTopics.filter(
+      (item) => item.performanceLevel === 'Strong'
+    )
+
+    const weakTopics = assessedTopics.filter(
+      (item) => item.performanceLevel === 'Needs Improvement'
+    )
 
     return res.json({
       success: true,
       topicPerformance,
+      strongTopics: strongTopics.map((item) => item.topic),
+      weakTopics: weakTopics.map((item) => item.topic),
+      recommendedNextActivity:
+        topicPerformance[0]?.recommendedActivity ||
+        'Start a quiz to begin tracking your progress.',
     })
   } catch (error) {
     console.error('Fetching recommendations failed:', error.message)
+
     return res.status(500).json({
       success: false,
       message: 'Failed to generate topic recommendations.',
+    })
+  }
+})
+// Level 4: prerequisite-aware concept recommendations.
+router.get(
+  '/concept-recommendations',
+  authenticateUser,
+  async (req, res) => {
+    try {
+      await recoverLegacyResults(req.user)
+
+      const recommendations = await getConceptRecommendations(
+        req.user._id
+      )
+
+      return res.json({
+        success: true,
+        recommendations,
+      })
+    } catch (error) {
+      console.error(
+        'Fetching concept recommendations failed:',
+        error.message
+      )
+
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to generate concept recommendations.',
+      })
+    }
+  }
+)
+// Adaptive question evaluation.
+router.post('/answer', authenticateUser, async (req, res) => {
+  try {
+    const { topic, questionId, selectedAnswer } = req.body
+
+    if (!topic || !questionId || !selectedAnswer) {
+      return res.status(400).json({
+        message: 'Topic, question ID, and selected answer are required.',
+      })
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(questionId)) {
+      return res.status(400).json({
+        message: 'Invalid question ID.',
+      })
+    }
+
+    const question = await Question.findById(questionId)
+
+    if (!question) {
+      return res.status(404).json({
+        message: 'Question not found.',
+      })
+    }
+
+    if (question.topic !== topic) {
+      return res.status(400).json({
+        message: 'Question does not belong to the selected topic.',
+      })
+    }
+
+    if (!question.options.includes(selectedAnswer)) {
+      return res.status(400).json({
+        message: 'Selected answer is not a valid option.',
+      })
+    }
+
+    let progress = await AdaptiveProgress.findOne({
+      userId: req.user.id,
+      topic,
+    })
+
+    if (!progress) {
+      progress = await AdaptiveProgress.create({
+        userId: req.user.id,
+        topic,
+        currentDifficulty: 'medium',
+      })
+    }
+
+    const questionIdString = question._id.toString()
+
+    if (
+      progress.attemptedQuestionIds.some(
+        (id) => id.toString() === questionIdString
+      )
+    ) {
+      return res.status(409).json({
+        message:
+          'This question has already been answered in this adaptive run.',
+      })
+    }
+
+    const isCorrect = selectedAnswer === question.correctAnswer
+    const levels = ['easy', 'medium', 'hard']
+    let difficultyChanged = false
+
+    if (isCorrect) {
+      progress.consecutiveCorrect += 1
+      progress.consecutiveIncorrect = 0
+    } else {
+      progress.consecutiveIncorrect += 1
+      progress.consecutiveCorrect = 0
+    }
+
+    if (progress.consecutiveCorrect >= 2) {
+      const currentIndex = levels.indexOf(progress.currentDifficulty)
+
+      if (currentIndex < levels.length - 1) {
+        progress.currentDifficulty = levels[currentIndex + 1]
+        difficultyChanged = true
+      }
+
+      progress.consecutiveCorrect = 0
+    } else if (progress.consecutiveIncorrect >= 2) {
+      const currentIndex = levels.indexOf(progress.currentDifficulty)
+
+      if (currentIndex > 0) {
+        progress.currentDifficulty = levels[currentIndex - 1]
+        difficultyChanged = true
+      }
+
+      progress.consecutiveIncorrect = 0
+    }
+
+    progress.attemptedQuestionIds.push(question._id)
+    await progress.save()
+
+    return res.json({
+      success: true,
+      isCorrect,
+      correctAnswer: question.correctAnswer,
+      explanation: question.explanation,
+      currentDifficulty: progress.currentDifficulty,
+      difficultyChanged,
+      consecutiveCorrect: progress.consecutiveCorrect,
+      consecutiveIncorrect: progress.consecutiveIncorrect,
+      attemptedQuestionIds: progress.attemptedQuestionIds.map((id) =>
+        id.toString()
+      ),
+    })
+  } catch (error) {
+    console.error('Answer evaluation error:', error)
+
+    return res.status(500).json({
+      message: 'Failed to evaluate answer.',
     })
   }
 })
